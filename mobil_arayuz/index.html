@@ -1,0 +1,976 @@
+<!DOCTYPE html>
+<!--
+================================================================================
+@file index.html
+@brief Mobile Web Dashboard for ROS 2 Mobile Robot Platform.
+
+Responsibilities:
+- Establishes a WebSocket connection to the onboard rosbridge_server (port 9090).
+- Visualizes the 2D occupancy grid map, real-time RPLiDAR laser scans, robot
+  pose, and Nav2 planned trajectories on an HTML5 Canvas.
+- Provides virtual dual-axis joysticks (nipplejs) for remote manual teleoperation
+  publishing to /cmd_vel_joy with twist_mux priority override.
+- Allows touch-and-drag 2D goal pose selection for Nav2 autonomous navigation.
+- Provides remote map saving triggers via Nav2's map_saver_server service.
+- Provides an emergency stop mechanism that halts motors and cancels active goals.
+================================================================================
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>ROS 2 Mobile Robot Dashboard</title>
+
+<!-- External Libraries: ROSLIB for WebSocket bridge, NippleJS for virtual joysticks -->
+<script src="https://cdn.jsdelivr.net/npm/roslib@1/build/roslib.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/nipplejs@0.10.1/dist/nipplejs.min.js"></script>
+
+<style>
+  /* ---------------------------------------------------------------------------
+   * Reset & Base Styles
+   * --------------------------------------------------------------------------- */
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
+  }
+  html, body {
+    height: 100%;
+    overflow: hidden;
+    background: #0d0d0d;
+    color: #e8e8e8;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    user-select: none;
+  }
+  #app {
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
+  }
+
+  /* ---------------------------------------------------------------------------
+   * Top Header & Status Indicator
+   * --------------------------------------------------------------------------- */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    flex-shrink: 0;
+  }
+  header .title {
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+  }
+  .status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+  }
+  .dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: #A32D2D;
+    transition: background 0.3s ease;
+  }
+  .dot.on {
+    background: #5DCAA5;
+  }
+
+  /* ---------------------------------------------------------------------------
+   * Connection Control Bar
+   * --------------------------------------------------------------------------- */
+  .ipbar {
+    display: flex;
+    gap: 8px;
+    padding: 6px 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    flex-shrink: 0;
+  }
+  .ipbar input {
+    flex: 1;
+    background: #1a1a1a;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: #e8e8e8;
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 13px;
+  }
+  .ipbar button {
+    background: #378ADD;
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: 6px 14px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .ipbar button:active {
+    background: #2a6db0;
+  }
+
+  /* ---------------------------------------------------------------------------
+   * Visualizer Canvas Viewport
+   * --------------------------------------------------------------------------- */
+  .viz {
+    position: relative;
+    flex: 1 1 auto;
+    background: #111;
+    min-height: 0;
+  }
+  .viz canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+  }
+  .hint {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    background: rgba(0, 0, 0, 0.65);
+    border-radius: 8px;
+    padding: 5px 10px;
+    font-size: 11px;
+    color: #aaa;
+    z-index: 5;
+    pointer-events: none;
+  }
+
+  #saveMapBtn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 6;
+    background: rgba(55, 138, 221, 0.9);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  #saveMapBtn:active {
+    background: #2a6db0;
+  }
+
+  /* ---------------------------------------------------------------------------
+   * Map Saving Modal Dialog
+   * --------------------------------------------------------------------------- */
+  .modal-bg {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.65);
+    z-index: 100;
+    display: none;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal-bg.show {
+    display: flex;
+  }
+  .modal {
+    background: #1a1a1a;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 14px;
+    padding: 20px;
+    width: 80%;
+    max-width: 320px;
+  }
+  .modal h3 {
+    font-size: 15px;
+    margin-bottom: 12px;
+    font-weight: 500;
+  }
+  .modal input {
+    width: 100%;
+    background: #0d0d0d;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: #e8e8e8;
+    border-radius: 8px;
+    padding: 9px 11px;
+    font-size: 14px;
+    margin-bottom: 14px;
+  }
+  .modal .mrow {
+    display: flex;
+    gap: 8px;
+  }
+  .modal button {
+    flex: 1;
+    border: none;
+    border-radius: 8px;
+    padding: 9px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .modal .ok {
+    background: #378ADD;
+    color: #fff;
+  }
+  .modal .cancel {
+    background: rgba(255, 255, 255, 0.1);
+    color: #aaa;
+  }
+
+  /* ---------------------------------------------------------------------------
+   * Real-time Velocity Telemetry Display
+   * --------------------------------------------------------------------------- */
+  .velbar {
+    display: flex;
+    flex-shrink: 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  }
+  .velcol {
+    flex: 1;
+    padding: 6px 12px;
+  }
+  .velcol:first-child {
+    border-right: 1px solid rgba(255, 255, 255, 0.1);
+  }
+  .velcol .vtitle {
+    font-size: 10px;
+    color: #777;
+    margin-bottom: 2px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .velcol .vrow {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .velcol .vrow span:first-child {
+    color: #888;
+  }
+  .velcol.cmd .vval {
+    color: #7FB6E8;
+  }
+  .velcol.act .vval {
+    color: #5DCAA5;
+  }
+
+  /* ---------------------------------------------------------------------------
+   * Control Interface (Joysticks & Emergency Stop)
+   * --------------------------------------------------------------------------- */
+  .controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+    flex-shrink: 0;
+    gap: 8px;
+  }
+  .joybox {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+  }
+  .joybox .jlabel {
+    font-size: 10px;
+    color: #888;
+    letter-spacing: 0.2px;
+  }
+  .joy {
+    width: 96px;
+    height: 96px;
+    position: relative;
+  }
+  #stop {
+    width: 70px;
+    height: 70px;
+    border-radius: 50%;
+    background: #A32D2D;
+    color: #fff;
+    border: none;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    flex-shrink: 0;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(163, 45, 45, 0.4);
+  }
+  #stop:active {
+    background: #791F1F;
+    transform: scale(0.96);
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- Header: App Title and ROS Connection Status -->
+  <header>
+    <span class="title">Robot Control</span>
+    <span class="status">
+      <span class="dot" id="dot"></span>
+      <span id="statusText">Disconnected</span>
+    </span>
+  </header>
+
+  <!-- Connection Bar: WebSocket Target Address & Connect Action -->
+  <div class="ipbar">
+    <input id="ip" type="text" value="ws://10.118.144.38:9090" placeholder="ws://robot-ip:9090">
+    <button onclick="connect()">Connect</button>
+  </div>
+
+  <!-- Visualizer Viewport: Occupancy Grid, LaserScan, Path & Pose -->
+  <div class="viz">
+    <canvas id="canvas"></canvas>
+    <div class="hint" id="hint">Touch and drag on the map to set a navigation goal</div>
+    <button id="saveMapBtn" onclick="openSaveModal()" style="display:none">Save Map</button>
+  </div>
+
+  <!-- Map Saving Modal Dialog -->
+  <div class="modal-bg" id="saveModal">
+    <div class="modal">
+      <h3>Save Map</h3>
+      <input id="mapName" type="text" placeholder="Map name (e.g. lab_floor)" value="my_map">
+      <div class="mrow">
+        <button class="cancel" onclick="closeSaveModal()">Cancel</button>
+        <button class="ok" onclick="saveMap()">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Telemetry Bar: Commanded vs Measured Velocities -->
+  <div class="velbar">
+    <div class="velcol cmd">
+      <div class="vtitle">Command Velocity</div>
+      <div class="vrow"><span>Linear</span><span class="vval" id="cmdLin">0.00 m/s</span></div>
+      <div class="vrow"><span>Angular</span><span class="vval" id="cmdAng">0.00 rad/s</span></div>
+    </div>
+    <div class="velcol act">
+      <div class="vtitle">Measured Velocity (Encoder)</div>
+      <div class="vrow"><span>Linear</span><span class="vval" id="actLin">0.00 m/s</span></div>
+      <div class="vrow"><span>Angular</span><span class="vval" id="actAng">0.00 rad/s</span></div>
+    </div>
+  </div>
+
+  <!-- Control Panel: Linear Joystick, Emergency Stop, Angular Joystick -->
+  <div class="controls">
+    <div class="joybox">
+      <span class="jlabel">Linear (Fwd / Rev)</span>
+      <div class="joy" id="joyLin"></div>
+    </div>
+    <button id="stop" onclick="emergencyStop()">STOP</button>
+    <div class="joybox">
+      <span class="jlabel">Angular (Turn L / R)</span>
+      <div class="joy" id="joyAng"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// =============================================================================
+// Robot Kinematics & Physical Parameters
+// =============================================================================
+const TRACK_WIDTH    = 0.30;                         // Distance between wheels [m]
+const WHEEL_DIAM     = 0.07;                         // Wheel diameter [m]
+const COUNTS_PER_REV = 3200;                         // Quadrature encoder pulses per revolution
+const M_PER_COUNT    = (Math.PI * WHEEL_DIAM) / COUNTS_PER_REV; // Distance traversed per pulse [m]
+const MAX_LINEAR     = 0.32;                         // Maximum linear velocity limit [m/s]
+const MAX_ANGULAR    = 1.50;                         // Maximum angular velocity limit [rad/s]
+
+// =============================================================================
+// Global State & ROS Handles
+// =============================================================================
+let ros = null;
+let pubCmd = null, pubGoal = null;
+let lastMap = null, lastScan = null, robotPose = null, lastPath = null;
+let mapCanvas = null, mapInfo = null;
+let drive = { linear: 0, angular: 0 };
+let joyActive = false;
+let currentMode = null; // 'mapping' or 'navigation'
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let CW = 0, CH = 0;
+
+// =============================================================================
+// Mathematical Utilities (Quaternion <-> Yaw)
+// =============================================================================
+function yawToQuat(yaw) {
+  return { x: 0, y: 0, z: Math.sin(yaw / 2), w: Math.cos(yaw / 2) };
+}
+
+function quatToYaw(q) {
+  return Math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
+}
+
+// =============================================================================
+// UI State & Mode Helpers
+// =============================================================================
+function setStatus(on, text) {
+  document.getElementById('dot').classList.toggle('on', on);
+  document.getElementById('statusText').textContent = text;
+}
+
+function setMode(mode) {
+  if (currentMode === mode) return;
+  currentMode = mode;
+  const saveBtn = document.getElementById('saveMapBtn');
+  const hint = document.getElementById('hint');
+  if (mode === 'mapping') {
+    saveBtn.style.display = 'block';
+    hint.textContent = 'Mapping mode — drive with joysticks, save map when complete';
+  } else if (mode === 'navigation') {
+    saveBtn.style.display = 'none';
+    hint.textContent = 'Autonomous mode — touch and drag on map to place a goal';
+  }
+}
+
+// =============================================================================
+// ROS Bridge Connection Management
+// =============================================================================
+function connect() {
+  const url = document.getElementById('ip').value.trim();
+  if (ros) {
+    try { ros.close(); } catch(e) {}
+  }
+  setStatus(false, 'Connecting...');
+  ros = new ROSLIB.Ros({ url });
+
+  ros.on('connection', () => {
+    setStatus(true, 'Connected');
+    setupTopics();
+  });
+  ros.on('error', () => setStatus(false, 'Error'));
+  ros.on('close', () => setStatus(false, 'Disconnected'));
+}
+
+// =============================================================================
+// ROS Topic Subscriptions & Publishers
+// =============================================================================
+function setupTopics() {
+  // Publishers
+  pubCmd = new ROSLIB.Topic({
+    ros,
+    name: '/cmd_vel_joy',
+    messageType: 'geometry_msgs/msg/Twist'
+  });
+  pubGoal = new ROSLIB.Topic({
+    ros,
+    name: '/goal_pose',
+    messageType: 'geometry_msgs/msg/PoseStamped'
+  });
+
+  // Subscriber: Commanded velocity feedback
+  new ROSLIB.Topic({
+    ros,
+    name: '/cmd_vel',
+    messageType: 'geometry_msgs/msg/Twist'
+  }).subscribe(m => {
+    document.getElementById('cmdLin').textContent = m.linear.x.toFixed(2) + ' m/s';
+    document.getElementById('cmdAng').textContent = m.angular.z.toFixed(2) + ' rad/s';
+  });
+
+  // Subscribers: Encoder measured wheel velocities
+  let lv = 0, rv = 0;
+  const updateActual = () => {
+    const vL = lv * M_PER_COUNT;
+    const vR = rv * M_PER_COUNT;
+    const v  = (vR + vL) / 2.0;
+    const w  = (vR - vL) / TRACK_WIDTH;
+    document.getElementById('actLin').textContent = v.toFixed(2) + ' m/s';
+    document.getElementById('actAng').textContent = w.toFixed(2) + ' rad/s';
+  };
+  new ROSLIB.Topic({ ros, name: '/left_motor_vel', messageType: 'std_msgs/msg/Int32' })
+    .subscribe(m => { lv = m.data; updateActual(); });
+  new ROSLIB.Topic({ ros, name: '/right_motor_vel', messageType: 'std_msgs/msg/Int32' })
+    .subscribe(m => { rv = m.data; updateActual(); });
+
+  // Subscriber: 2D Occupancy Grid Map
+  let mapUnsubDone = false;
+  const mapTopic = new ROSLIB.Topic({
+    ros,
+    name: '/map',
+    messageType: 'nav_msgs/msg/OccupancyGrid',
+    throttle_rate: 1000,
+    queue_length: 1,
+    compression: 'cbor'
+  });
+  mapTopic.subscribe(m => {
+    lastMap = m;
+    buildMapCanvas(m);
+
+    // In navigation mode, the static map needs to be fetched only once to preserve bandwidth
+    if (currentMode === 'navigation' && !mapUnsubDone) {
+      mapTopic.unsubscribe();
+      mapUnsubDone = true;
+    }
+  });
+
+  // Subscriber: 2D LaserScan
+  new ROSLIB.Topic({
+    ros,
+    name: '/scan',
+    messageType: 'sensor_msgs/msg/LaserScan',
+    throttle_rate: 500,
+    queue_length: 1
+  }).subscribe(m => { lastScan = m; });
+
+  // Subscriber: AMCL localized pose (switches UI to navigation mode)
+  new ROSLIB.Topic({
+    ros,
+    name: '/amcl_pose',
+    messageType: 'geometry_msgs/msg/PoseWithCovarianceStamped'
+  }).subscribe(m => {
+    const p = m.pose.pose;
+    robotPose = { x: p.position.x, y: p.position.y, yaw: quatToYaw(p.orientation) };
+    setMode('navigation');
+  });
+
+  // Subscriber: SLAM estimated pose (switches UI to mapping mode)
+  new ROSLIB.Topic({
+    ros,
+    name: '/pose',
+    messageType: 'geometry_msgs/msg/PoseWithCovarianceStamped'
+  }).subscribe(m => {
+    const p = m.pose.pose;
+    robotPose = { x: p.position.x, y: p.position.y, yaw: quatToYaw(p.orientation) };
+    setMode('mapping');
+  });
+
+  new ROSLIB.Topic({
+    ros,
+    name: '/slam_toolbox/feedback',
+    messageType: 'visualization_msgs/msg/InteractiveMarkerFeedback'
+  }).subscribe(() => { setMode('mapping'); });
+
+  // Subscribers: Coordinate frame transforms
+  new ROSLIB.Topic({
+    ros,
+    name: '/tf',
+    messageType: 'tf2_msgs/msg/TFMessage',
+    throttle_rate: 400,
+    queue_length: 1
+  }).subscribe(m => {
+    m.transforms.forEach(storeTf);
+    updatePoseFromTf();
+  });
+
+  new ROSLIB.Topic({
+    ros,
+    name: '/tf_static',
+    messageType: 'tf2_msgs/msg/TFMessage'
+  }).subscribe(m => { m.transforms.forEach(storeTf); });
+
+  // Subscriber: Planned global trajectory
+  new ROSLIB.Topic({
+    ros,
+    name: '/plan',
+    messageType: 'nav_msgs/msg/Path',
+    throttle_rate: 500,
+    queue_length: 1
+  }).subscribe(m => { lastPath = m; });
+}
+
+// =============================================================================
+// Coordinate Transform Tree (TF) Resolution
+// =============================================================================
+const tfTree = {};
+
+function storeTf(t) {
+  const tr = t.transform.translation;
+  const ro = t.transform.rotation;
+  tfTree[t.child_frame_id] = {
+    parent: t.header.frame_id,
+    x: tr.x,
+    y: tr.y,
+    yaw: quatToYaw(ro),
+  };
+}
+
+function updatePoseFromTf() {
+  let frame = 'base_link';
+  let x = 0, y = 0, yaw = 0;
+  let guard = 0;
+  while (frame !== 'map' && guard++ < 10) {
+    const tf = tfTree[frame];
+    if (!tf) return;
+
+    const c = Math.cos(tf.yaw), s = Math.sin(tf.yaw);
+    const nx = tf.x + x * c - y * s;
+    const ny = tf.y + x * s + y * c;
+    x = nx;
+    y = ny;
+    yaw = yaw + tf.yaw;
+    frame = tf.parent;
+  }
+  if (frame === 'map') {
+    robotPose = { x, y, yaw };
+  }
+}
+
+// =============================================================================
+// Canvas Rasterization & Viewport Projections
+// =============================================================================
+function buildMapCanvas(map) {
+  const info = map.info;
+  mapInfo = info;
+  const mw = info.width, mh = info.height;
+  mapCanvas = document.createElement('canvas');
+  mapCanvas.width = mw;
+  mapCanvas.height = mh;
+  const mctx = mapCanvas.getContext('2d');
+  const img = mctx.createImageData(mw, mh);
+  const d = map.data;
+
+  for (let row = 0; row < mh; row++) {
+    for (let col = 0; col < mw; col++) {
+      const v = d[row * mw + col];
+      const imgRow = mh - 1 - row; // Invert Y-axis for standard image coordinates
+      const idx = (imgRow * mw + col) * 4;
+      let r, g, b, a = 255;
+      if (v < 0) {
+        // Unknown cell: fully transparent
+        r = 0; g = 0; b = 0; a = 0;
+      } else if (v === 0) {
+        // Free space: dark gray
+        r = 60; g = 60; b = 65;
+      } else {
+        // Occupied obstacle: bright light gray
+        r = 230; g = 230; b = 235;
+      }
+      img.data[idx]     = r;
+      img.data[idx + 1] = g;
+      img.data[idx + 2] = b;
+      img.data[idx + 3] = a;
+    }
+  }
+  mctx.putImageData(img, 0, 0);
+}
+
+function mapView() {
+  if (!mapInfo) return null;
+  const res = mapInfo.resolution;
+  const wM = mapInfo.width * res, hM = mapInfo.height * res;
+  const scale = Math.min(CW / wM, CH / hM);
+  const drawW = wM * scale, drawH = hM * scale;
+  const padX = (CW - drawW) / 2, padY = (CH - drawH) / 2;
+  return {
+    res, wM, hM, scale, drawW, drawH, padX, padY,
+    ox: mapInfo.origin.position.x,
+    oy: mapInfo.origin.position.y
+  };
+}
+
+function worldToPx(wx, wy, mv) {
+  const rx = wx - mv.ox, ry = wy - mv.oy;
+  return {
+    px: mv.padX + rx * mv.scale,
+    py: mv.padY + (mv.hM - ry) * mv.scale
+  };
+}
+
+function pxToWorld(px, py, mv) {
+  const rx = (px - mv.padX) / mv.scale;
+  const ry = mv.hM - (py - mv.padY) / mv.scale;
+  return {
+    x: mv.ox + rx,
+    y: mv.oy + ry
+  };
+}
+
+function resize() {
+  const r = canvas.getBoundingClientRect();
+  CW = r.width;
+  CH = r.height;
+  canvas.width = r.width * devicePixelRatio;
+  canvas.height = r.height * devicePixelRatio;
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+}
+window.addEventListener('resize', resize);
+
+// =============================================================================
+// Rendering Loop
+// =============================================================================
+function render() {
+  ctx.clearRect(0, 0, CW, CH);
+  const mv = mapView();
+
+  // 1. Draw Occupancy Grid Map
+  if (mapCanvas && mv) {
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(mapCanvas, mv.padX, mv.padY, mv.drawW, mv.drawH);
+  }
+
+  // 2. Draw RPLiDAR 2D LaserScan Hits
+  if (lastScan && robotPose && mv) {
+    ctx.fillStyle = '#5DCAA5';
+    const a0 = lastScan.angle_min, da = lastScan.angle_increment;
+    const cy = Math.cos(robotPose.yaw), sy = Math.sin(robotPose.yaw);
+    for (let i = 0; i < lastScan.ranges.length; i++) {
+      const rr = lastScan.ranges[i];
+      if (!isFinite(rr) || rr < lastScan.range_min || rr > lastScan.range_max) continue;
+      const a = a0 + i * da;
+      const lx = rr * Math.cos(a), ly = rr * Math.sin(a);
+      const mx = robotPose.x + lx * cy - ly * sy;
+      const my = robotPose.y + lx * sy + ly * cy;
+      const p = worldToPx(mx, my, mv);
+      ctx.fillRect(p.px - 1.5, p.py - 1.5, 3, 3);
+    }
+  }
+
+  // 3. Draw Planned Trajectory Path
+  if (lastPath && lastPath.poses && lastPath.poses.length && mv) {
+    ctx.strokeStyle = '#25FF00';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    lastPath.poses.forEach((ps, i) => {
+      const p = worldToPx(ps.pose.position.x, ps.pose.position.y, mv);
+      if (i === 0) ctx.moveTo(p.px, p.py); else ctx.lineTo(p.px, p.py);
+    });
+    ctx.stroke();
+  }
+
+  // 4. Draw Robot Pose & Heading Indicator
+  if (robotPose && mv) {
+    const p = worldToPx(robotPose.x, robotPose.y, mv);
+    ctx.fillStyle = '#EF9F27';
+    ctx.beginPath();
+    ctx.arc(p.px, p.py, 7, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(p.px, p.py);
+    ctx.lineTo(p.px + 14 * Math.cos(-robotPose.yaw), p.py + 14 * Math.sin(-robotPose.yaw));
+    ctx.stroke();
+  }
+
+  // 5. Draw Interactive Goal Drag Arrow
+  if (dragGoal && mv) {
+    const a = worldToPx(dragGoal.x, dragGoal.y, mv);
+    ctx.strokeStyle = '#E24B4A';
+    ctx.fillStyle = '#E24B4A';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(a.px, a.py, 8, 0, Math.PI * 2);
+    ctx.stroke();
+
+    const len = 26;
+    ctx.beginPath();
+    ctx.moveTo(a.px, a.py);
+    ctx.lineTo(a.px + len * Math.cos(-dragGoal.yaw), a.py + len * Math.sin(-dragGoal.yaw));
+    ctx.stroke();
+  }
+
+  requestAnimationFrame(render);
+}
+
+// =============================================================================
+// Touch Event Handling for Goal Placement
+// =============================================================================
+let dragStart = null, dragGoal = null;
+
+function evtPos(e) {
+  const r = canvas.getBoundingClientRect();
+  const t = e.touches ? e.touches[0] : e;
+  return { x: t.clientX - r.left, y: t.clientY - r.top };
+}
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  if (currentMode !== 'navigation') return;
+  const mv = mapView();
+  if (!mv) return;
+  const pos = evtPos(e);
+  const w = pxToWorld(pos.x, pos.y, mv);
+  dragStart = pos;
+  dragGoal = { x: w.x, y: w.y, yaw: 0 };
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (currentMode !== 'navigation') return;
+  if (!dragStart || !dragGoal) return;
+  const pos = evtPos(e);
+  dragGoal.yaw = Math.atan2(-(pos.y - dragStart.y), pos.x - dragStart.x);
+}, { passive: false });
+
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  if (currentMode !== 'navigation') return;
+  if (!dragGoal) return;
+  publishGoal(dragGoal.x, dragGoal.y, dragGoal.yaw);
+  dragStart = null;
+  setTimeout(() => { dragGoal = null; }, 600);
+}, { passive: false });
+
+function publishGoal(x, y, yaw) {
+  if (!ros) return;
+  pubGoal.publish(new ROSLIB.Message({
+    header: { frame_id: 'map' },
+    pose: { position: { x, y, z: 0 }, orientation: yawToQuat(yaw) }
+  }));
+  document.getElementById('hint').textContent = 'Goal sent → Robot navigating';
+}
+
+// =============================================================================
+// Remote Map Saving Action (via Nav2 map_saver_server)
+// =============================================================================
+function openSaveModal() {
+  document.getElementById('saveModal').classList.add('show');
+}
+
+function closeSaveModal() {
+  document.getElementById('saveModal').classList.remove('show');
+}
+
+function saveMap() {
+  if (!ros) { alert('Connect to robot first'); return; }
+  let name = document.getElementById('mapName').value.trim();
+  if (!name) { alert('Please enter a valid map name'); return; }
+
+  name = name.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const url = '/home/asametpi/maps/' + name;
+
+  const saveClient = new ROSLIB.Service({
+    ros,
+    name: '/map_saver_server/save_map',
+    serviceType: 'nav2_msgs/srv/SaveMap'
+  });
+
+  const req = new ROSLIB.ServiceRequest({
+    map_topic: 'map',
+    map_url: url,
+    image_format: 'pgm',
+    map_mode: 'trinary',
+    free_thresh: 0.25,
+    occupied_thresh: 0.65
+  });
+
+  document.getElementById('hint').textContent = 'Saving map to disk...';
+  saveClient.callService(req,
+    (result) => {
+      if (result && result.result) {
+        document.getElementById('hint').textContent = 'Map successfully saved: ' + name;
+      } else {
+        document.getElementById('hint').textContent = 'Map saving failed (server returned false)';
+      }
+      closeSaveModal();
+    },
+    (err) => {
+      document.getElementById('hint').textContent = 'Save error: Verify map_saver_server is active';
+      closeSaveModal();
+    }
+  );
+}
+
+// =============================================================================
+// Dual Virtual Joysticks (Linear & Angular Teleoperation)
+// =============================================================================
+const joyLin = nipplejs.create({
+  zone: document.getElementById('joyLin'),
+  mode: 'static',
+  position: { left: '50%', top: '50%' },
+  color: '#378ADD',
+  size: 88,
+  lockY: true
+});
+
+joyLin.on('move', (evt, data) => {
+  if (!data || !data.vector) return;
+  const f = Math.max(-1, Math.min(1, data.vector.y));
+  drive.linear = f * MAX_LINEAR;
+  joyActive = true;
+});
+
+joyLin.on('end', () => {
+  drive.linear = 0;
+  checkIdle();
+});
+
+const joyAng = nipplejs.create({
+  zone: document.getElementById('joyAng'),
+  mode: 'static',
+  position: { left: '50%', top: '50%' },
+  color: '#5DCAA5',
+  size: 88,
+  lockX: true
+});
+
+joyAng.on('move', (evt, data) => {
+  if (!data || !data.vector) return;
+  const t = Math.max(-1, Math.min(1, data.vector.x));
+  drive.angular = -t * MAX_ANGULAR;
+  joyActive = true;
+});
+
+joyAng.on('end', () => {
+  drive.angular = 0;
+  checkIdle();
+});
+
+function checkIdle() {
+  if (Math.abs(drive.linear) < 1e-6 && Math.abs(drive.angular) < 1e-6) {
+    joyActive = false;
+    sendDrive(); // Transmit zero velocity stop frame upon release
+  }
+}
+
+function sendDrive() {
+  if (!pubCmd) return;
+  pubCmd.publish(new ROSLIB.Message({
+    linear:  { x: drive.linear,  y: 0, z: 0 },
+    angular: { x: 0, y: 0, z: drive.angular }
+  }));
+}
+
+// Transmit teleoperation velocity frames periodically while joystick is held
+setInterval(() => {
+  if (joyActive) sendDrive();
+}, 100);
+
+// =============================================================================
+// Emergency Stop & Goal Cancellation Handler
+// =============================================================================
+function emergencyStop() {
+  drive.linear = 0;
+  drive.angular = 0;
+  joyActive = false;
+  sendDrive();
+
+  lastPath = null;
+
+  if (ros) {
+    const cancelClient = new ROSLIB.Service({
+      ros,
+      name: '/navigate_to_pose/_action/cancel_goal',
+      serviceType: 'action_msgs/srv/CancelGoal'
+    });
+
+    const req = new ROSLIB.ServiceRequest({
+      goal_info: {
+        goal_id: { uuid: Array(16).fill(0) },
+        stamp: { sec: 0, nanosec: 0 }
+      }
+    });
+
+    cancelClient.callService(req,
+      () => { document.getElementById('hint').textContent = 'Emergency Stop: Goals canceled, motors idle'; },
+      () => { document.getElementById('hint').textContent = 'Emergency Stop commanded'; }
+    );
+  }
+}
+
+// Initialize viewport geometry and start the render loop
+resize();
+render();
+</script>
+</body>
+</html>

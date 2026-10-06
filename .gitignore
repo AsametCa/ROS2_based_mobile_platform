@@ -1,0 +1,36 @@
+# ==============================================================================
+# Git Ignore Configuration for ROS 2 Mobile Platform Project
+# ==============================================================================
+
+# PlatformIO build directories & dependencies
+.pio/
+*/.pio/
+.pioenvs/
+.piolibdeps/
+*.sconsign*
+*.dblite
+
+# ROS 2 & Colcon build directories
+build/
+install/
+log/
+COLCON_IGNORE
+
+# Python compiled bytecode & caches
+__pycache__/
+*/__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# IDEs, editors & temporary files
+.vscode/
+*/.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS artifacts
+.DS_Store
+Thumbs.db

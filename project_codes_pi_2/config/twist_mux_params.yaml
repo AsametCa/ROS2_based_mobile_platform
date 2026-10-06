@@ -1,0 +1,21 @@
+# ==============================================================================
+# @file twist_mux_params.yaml
+# @brief Velocity command multiplexing configuration for differential drive.
+#
+# Responsibilities:
+# - Prioritizes manual teleoperation commands over autonomous Nav2 commands.
+# - Multiplexes input topics into /cmd_vel for ESP32 motor controller.
+# ==============================================================================
+
+twist_mux:
+  ros__parameters:
+    use_stamped: false
+    topics:
+      joystick:
+        topic:    cmd_vel_joy
+        timeout:  0.5
+        priority: 100      # High priority: Operator manual teleoperation override
+      navigation:
+        topic:    cmd_vel_nav
+        timeout:  0.5
+        priority: 10       # Low priority: Autonomous Nav2 controller commands
