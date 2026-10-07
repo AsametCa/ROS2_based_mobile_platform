@@ -40,9 +40,9 @@ flowchart TD
     subgraph Pi ["Master Layer (Raspberry Pi 4 - 2GB RAM / ROS 2 Jazzy)"]
         RosBridge["rosbridge_server & rosapi<br/>(WebSocket Port 9090)"]
         TwistMux["twist_mux<br/>Priority Arbiter"]
-        OdomNode["odometry_node<br/>- Dead Reckoning<br/>- Broadcasts /odom & TF (odom -> base_link)"]
+        OdomNode["odometry_node<br/>- Dead Reckoning<br/>- Broadcasts /odom & TF (odom → base_link)"]
         TrajPub["trajectory_publisher<br/>Publishes /odom_path & /slam_path"]
-        RPLidar["rplidar_ros & static_tf<br/>Publishes /scan & TF (base_link -> laser)"]
+        RPLidar["rplidar_ros & static_tf<br/>Publishes /scan & TF (base_link → laser)"]
         
         subgraph NavStack ["Autonomous & Mapping Stack"]
             SLAM["slam_toolbox (Online Async)"]
@@ -62,28 +62,28 @@ flowchart TD
     end
 
     %% Communications
-    WebUI <-->|WebSocket JSON / CBOR| RosBridge
-    RosBridge -->|/cmd_vel_joy| TwistMux
-    RosBridge -->|/goal_pose| Nav2
-    RosBridge <-->|Call /map_saver_server/save_map| MapServer
+    WebUI <-->|"WebSocket JSON / CBOR"| RosBridge
+    RosBridge -->|"/cmd_vel_joy"| TwistMux
+    RosBridge -->|"/goal_pose"| Nav2
+    RosBridge <-->|"Call /map_saver_server/save_map"| MapServer
     
-    Nav2 -->|/cmd_vel_nav| TwistMux
-    TwistMux -->|/cmd_vel| MicroROSAgent
+    Nav2 -->|"/cmd_vel_nav"| TwistMux
+    TwistMux -->|"/cmd_vel"| MicroROSAgent
     
-    RPLidar -->|/scan| SLAM
-    RPLidar -->|/scan| AMCL
-    RPLidar -->|/scan| Nav2
+    RPLidar -->|"/scan"| SLAM
+    RPLidar -->|"/scan"| AMCL
+    RPLidar -->|"/scan"| Nav2
     
-    SLAM -->|/map & TF (map -> odom)| TrajPub
-    AMCL -->|TF (map -> odom)| TrajPub
-    OdomNode -->|/odom & TF (odom -> base_link)| TrajPub
-    OdomNode -->|/odom| Nav2
+    SLAM -->|"/map & TF (map → odom)"| TrajPub
+    AMCL -->|"TF (map → odom)"| TrajPub
+    OdomNode -->|"/odom & TF (odom → base_link)"| TrajPub
+    OdomNode -->|"/odom"| Nav2
     
-    MicroROSAgent <-->|UART Serial (/dev/ttyACM0)| MicroROSClient
-    MicroROSClient -->|/left_motor_vel, /right_motor_vel| OdomNode
+    MicroROSAgent <-->|"UART Serial (/dev/ttyACM0)"| MicroROSClient
+    MicroROSClient -->|"/left_motor_vel, /right_motor_vel"| OdomNode
     MicroROSClient --> PIDController
     PIDController --> MotorDriver
-    Encoders -->|Hardware Interrupts| PIDController
+    Encoders -->|"Hardware Interrupts"| PIDController
 ```
 
 ---
